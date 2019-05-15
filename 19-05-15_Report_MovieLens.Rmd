@@ -1,0 +1,326 @@
+---
+title: "MovieLens"
+author: "Michael Strenge - https://github.com/mistrenge/MovieLens.git"
+date: "15 5 2019"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+```{r include = FALSE}
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(caret)
+library(gridExtra)
+library(Hmisc)
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+     semi_join(edx, by = "movieId") %>%
+     semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+
+# Introduction
+The purpose of this project is to create a movie recommendation system using the MovieLens dataset. In general, recommendation systems use ratings that users have given items to make specific recommendations. Since many organizations such as Amazon, Alibaba or Netflix permit their customers to rate their products and services, they are able to collect a massive amount of data that can be used to predict what rating a particular user will give a specific item. Items with a high predicted rating are then recommended to users. For example, Netflix uses a recommendation system that predicts how many stars a user will give a particular movie, with one star representing a poor movie and five stars an excellent movie.
+
+As the Netflix database is not publicly available so far, the GroupLens research lab generated their own dataset with over 20 million ratings for over 27,000 movies by more than 138,000 users. However, the MovieLens dataset which will be used in this project is only a small subset of the much larger original version. In order to make the computation easier, this project will use the 10M version of the MovieLens dataset. Each row in the data represents a rating given by one user to one movie, including information such as user id, movie id, genre, title, and rating.
+The main goal of this project is to train a machine learning algorithm using the inputs in one subset to predict movie ratings in the validation set. Building on user, genre and movie inputs, this project constructs a model that identifies the drivers of movie ratings and improves the prediction performance of the recommendation system. The residual mean squared error (RMSE) will be used to evaluate how close predictions are to the true values in the validation set.
+
+The report is structured according the performed key project steps and therefore proceeds as follows: In the next section, the methods and analysis procedures will be described by highlighting the data preparation, exploration and visualization techniques and outcomes. Based on these insights, the modelling approach will be described and explained. The presentation and discussion of the modelling results (incl. RMSEs) follow. The report concludes with general learnings, outlines the limitations of the applied and tested approach, and provides directions for future modelling endeavors.
+
+# Methods & Analysis
+## Data Preparation
+After the corresponding dataset has been loaded, the first steps is to define the respective columns (e.g., movieId, title, etc.) and transform them into the appropriate format. This is followed by a separation into training ("edx") and test set ("validation"), with the validation set representing 10% of the MovieLens data. In addition, the project ensures that the userId and movieId data in the validation set are also in the training set. An excerpt of the training set after data preparation is shown in the following table, consisting of 6 columns and 9,000,055 rows:
+
+```{r, echo=FALSE}
+# Show training data set
+edx %>% slice (1:3)
+```
+
+## Data Exploration
+The data exploration starts by analyzing how many different movies, users and genres are in the training set. 10,677 movies, 69,878 users and 797 genres could be identified. 
+
+```{r, echo=FALSE}
+# Identify number of unique users, movies, and genres
+edx %>% 
+  summarise(n_users = n_distinct(userId),
+            n_movies = n_distinct(movieId),
+            n_genres = n_distinct (genres))
+```
+
+Note that the goal is to predict the rating for movies by users and in principle all other ratings related to movies and by users can be used as predictors, but different users rate different movies and a different number of movies. A machine learning algorithm seems to be there quite complex. In order to get a better understanding on the distribution of the data and potential drivers of ratings, the average ratings and number of ratings across movies, users and genres are computed and graphical illustrated.
+
+```{r, echo=FALSE, fig.width= 15, fig.height = 15, fig.align = "center"}
+# Compute and plot average rating across users, movies and genres
+U1 <- edx %>% 
+  group_by(userId) %>% 
+  summarise(avg = mean(rating)) %>% 
+  ggplot(aes(avg)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Average rating across users")
+
+M1 <- edx %>% 
+  group_by(movieId) %>% 
+  summarise(avg = mean(rating)) %>% 
+  ggplot(aes(avg)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Average rating across movies")
+
+G1 <- edx %>% 
+  group_by(genres) %>% 
+  summarise(avg = mean(rating)) %>% 
+  ggplot(aes(avg)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Average rating across genres")
+
+grid.arrange(U1, M1, G1, nrow = 3, newpage = TRUE)
+```
+
+```{r, echo=FALSE, fig.width= 15, fig.height = 15, fig.align = "center"}
+# Compute and plot number of ratings across users, movies and genres
+U2 <- edx %>% 
+  group_by(userId) %>% 
+  summarise(n = n()) %>% 
+  filter (n <= 1000) %>%
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Number of ratings across users")
+
+M2 <- edx %>% 
+  group_by(movieId) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Number of ratings across movies")
+
+G2 <- edx %>% 
+  group_by(genres) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") +
+  ggtitle ("Number of ratings across genres")
+
+grid.arrange(U2, M2, G2, nrow = 3, newpage = TRUE)
+```
+
+The histograms indicate that the distribution of average ratings appears to be normally distributed. The first thing the histograms show is that some movies get rated more and higher than others. This is no surprise because there are blockbuster movies watched by millions and are very popular, independent movies watched by just a few. A second observation is that some users are more active than others at rating movies. There is substantial variability across users` average rating as well: some users are very cranky and others love every movie.
+These insights suggest that the movie, user, and genre data could potentially affect the rating.
+However, before proceeding with the description of the modeling approach, the missing values are analyzed. Overall, no missing values could be identified in the training and validation set.
+
+## Modeling Approach
+As already mentioned, the project uses the RMSE to evaluate how close predictions are to the true values in the validation set. The projects defines $y_{u,i}$  as the rating for movie ${i}$ by user $u$ and denote the prediction with $\hat{y}_{u,i}$. Thus, the RMSE is defined as:
+$$RMSE = \sqrt{\frac{1}{N}\sum_{u,i}(\hat{y}_{u,i} - y_{u,i})^2}$$
+with $N$ being the number of user or movie combinations and the sum occurring over all these combinations. The RMSE can be interpret similarly to a standard deviation. 
+The project uses a stepwise procedure to construct the model and compares the different approaches based on the RMSE results. Please note that the calculation will not be based on the lm function because of computational power issues.
+
+"Just the average":  The project starts by building the simplest possible recommendation system: predicting the same rating for all movies regardless of user. This model assumes the same rating for all movies and users with all the differences explained by random variation and looks like this:
+$$Y_{u,i}= \mu + \epsilon_{u,i}$$
+With $\epsilon_{u,i}$ as independent errors sampled the same distribution centered at 0 and $\mu$ the true rating for all movies. The estimate that minimizes the RMSE is the least squares estimate of $\mu$ and, in this case, is the average of all ratings.
+
+Modeling movie effects: The histograms show that some movies are rated higher than others. The model can be therefore augment by adding the term $b_i$ to present the average movie ranking:
+$$Y_{u,i}= \mu + b_i + \epsilon_{u,i}$$
+Note that the least square estimate $\hat{b}_i$ is the average of $Y_{u,i} - \hat{\mu}$ for each movie $i$.
+
+Modeling genre effect. Although the histograms do not clearly show that the genres might also have an effect on the ratings, it seems plausible to control for genre-specific effects $b_g$ und extent the movie effect model accordingly. The equation is described as follows:
+$$Y_{u,i}= \mu + b_i + b_g + \epsilon_{u,i}$$
+To fit this model, an approximation will be computed by computing  $\hat{\mu}$ and $\hat{b}_i$ and estimating $\hat{b}_g$ as the average of $Y_{u,i}-\hat{\mu}-\hat{b}_i$. The result section will later show that the inclusion of genre effects does not improve the RMSE and therefore will be excluded in the further model design.
+
+Modeling user effects: Based on the data visualization results, the movie effect model could be further improved by including a user-specific effect $b_u$:
+$$Y_{u,i}= \mu + b_i + b_u + \epsilon_{u,i}$$
+To fit this model, an approximation will be computed by computing  $\hat{\mu}$ and $\hat{b}_i$ and estimating $\hat{b}_u$ as the average of $Y_{u,i}- \hat{\mu} - \hat{b}_i$.
+
+Regularization of movie and user effects: The project computes standard error and constructed confidence intervals to account for different levels of uncertainty. However, one number, one prediction and not an interval is needed when making predictions. That is why it makes sense to consider the concept of regularization. The general idea of the regularization concept is to control the total variability of the movie and user effects. More precisely, instead of minimizing the least square equation, an equation that adds a penalty will be minimized:
+$$\frac{1}{N}\sum_{u,i}(y_{u,i} - \mu - b_{i})^2 + \lambda \sum_{i}b_{i}^2$$
+
+The first term represents the least squares and the second is a penalty that gets larger when many $b_i$  are large. The values of $b_i$ that minimize this equation are:
+$$b_i(\lambda)=\frac{1}{\lambda+n_i}\sum_{u=1}^{n_i}(y_{u,i}-\hat{\mu})$$
+Where $n_i$ is the number of ratings made for movie $i$. $\lambda$ is a tuning parameter and can be chosen by using cross-validation.
+
+# Results
+The table below reports the results of the modeling approach and the RMSE for each model. As described in the previous section, the project proceeds stepwise to construct the model and compares the different approaches based on the RMSE results. Note that missing values are replaced by the mean value, where necessary in the context of the respective steps of the modeling approach.
+
+```{r, echo=FALSE}
+# Write a function that computes the RMSE for vectors of ratings and their corresponding predictors
+RMSE <- function(true_ratings, predicted_ratings){
+    sqrt(mean((true_ratings - predicted_ratings)^2))
+  }
+
+# Build a first model called "Just the average"
+# Model assumes the same rating for all movies and users with all the differences explained by random variation
+mu_hat <- mean(edx$rating)
+
+naive_rmse <- RMSE(validation$rating, mu_hat)
+
+rmse_results <- tibble(method = "Just The Average", RMSE = naive_rmse)
+
+# Modeling movie effects
+# Augment previous model by adding average ranking for movie i
+# Least square estimate b_i is the average of rating - mu for each movie i
+mu <- mean(edx$rating)
+
+movie_avgs <- validation %>% 
+  group_by(movieId) %>% 
+  summarise(b_i = mean(rating - mu))
+
+# Create predicted ratings
+predicted_ratings <- mu + validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+
+# Generate RMSE, create and print result table for movie effect model
+model_1_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie Effect Model",  
+                                     RMSE = model_1_rmse))
+
+
+# Modeling genre effects
+# Augment movie effect model by adding average ranking for genres
+genre_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(genres) %>%
+  summarise(b_g = mean(rating - mu - b_i))
+
+# Create predicted ratings
+predicted_ratings <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(genre_avgs, by='genres') %>%
+  mutate(pred = mu + b_i + b_g) %>%
+  pull(pred)
+
+# Impute predicted ratings by using mean method because of missing values ("NA")
+
+new_predicted_ratings <- impute(predicted_ratings, mean)
+
+# Generate RMSE, create and print result table for movie & genre effects model
+model_2_rmse <- RMSE(new_predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie + Genre Effect Model",  
+                                     RMSE = model_2_rmse))
+
+# Modeling user effects
+# Augment movie effect model by adding average ranking for users
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarise(b_u = mean(rating - mu - b_i))
+
+# Create predicted ratings
+predicted_ratings <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+# Impute predicted ratings by using mean method because of missing values ("NA")
+new_predicted_ratings <- impute(predicted_ratings, mean)
+
+# Generate RMSE, create and print result table for movie & user effects model
+model_3_rmse <- RMSE(new_predicted_ratings, validation$rating)
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Movie + User Effect Model",  
+                                     RMSE = model_3_rmse))
+
+
+# Regularization of movie & user effects
+
+# Construct regularized movie and user effect model to control total variability of effects
+# Penalty terms: Use cross-validation to choose tuning parameter lambda 
+lambdas <- seq(0, 10, 0.25)
+
+rmses <- sapply(lambdas, function(l){
+
+  mu <- mean(edx$rating)
+  
+  b_i <- edx %>% 
+    group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- edx %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - b_i - mu)/(n()+l))
+
+  predicted_ratings <- 
+    validation %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+    return(RMSE(predicted_ratings, validation$rating))
+})
+
+# optimal lambda
+lambda <- lambdas[which.min(rmses)]
+
+
+# Generate RMSE, create and print result table for regularized movie & user effect model
+rmse_results <- bind_rows(rmse_results,
+                          tibble(method="Regularized Movie + User Effect Model",  
+                                     RMSE = min(rmses)))
+rmse_results %>% knitr::kable()
+
+```
+
+
+In the first model, only the average of the ratings for all movies is calculated regardless of users. As a starting point, this model achieves a RMSE of 1.06. In the second step, the movie effects are tested, whereby the RMSE improves to 0.94. However, considering genre effects does not contribute to a better RMSE. Therefore, the genre variable is not included in the further model development process. In contrast, the table shows that the RMSE is reduced to 0.90 by adding user effects. Before describing the results of the regularization approach, the tables below show that many movies were rated by very few users and larger estimates are more likely. Large errors can increase RMSE, so it make sense to be conservative when unsure. Since the regularization of movie and user effects controls the total variability of effects, the results indeed show that in the final model the RMSE can be improved to 0.86.
+
+```{r, echo=FALSE, fig.width= 15, fig.height = 15, fig.align = "center"}
+
+# Explore mistakes in first model by using movie effects
+mistakes <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  mutate(residual = rating - (mu + b_i)) %>%
+  group_by(title) %>%
+  summarise (b_i = mean(b_i), n = n())
+  
+mistakes %>% arrange(desc(b_i)) %>% slice (1:10) %>% knitr::kable(caption = "10 best movies")
+mistakes %>% arrange(b_i) %>% slice (1:10) %>% knitr::kable(caption = "10 worst movies")
+
+```
+
+# Conclusion
+The purpose of this project is to create a movie recommendation system based on the MovieLens dataset. Applying machine learning techniques, the results suggest that, in particular, movie and user-specific variables are suitable drivers for predicting movie ratings. The final model achieves a RMSE of 0.86. The results can be used to help organizations such as Netflix or Amazon to provide their customers better services by recommending movies closer to actual customer preferences. Particularly in a highly competitive market such as movie platforms, high customer satisfaction and customer loyalty are significant competitive factors.
+
+This project has some limitations that point to interesting avenues for future research and modelling endeavors.  Although genre effects do not contribute to a reduction of the RMSE, it would be interesting to further study this variable. For example, better effects may be achieved if the variable is further split into individual genres such as action, comedy, etc. and thus does not contain a combination of multiple genres per movie. Furthermore, when testing the machine learning algorithm only 10% of the original MovieLens data set is used. Future modeling efforts could use a larger proportion of the dataset and test different machine learning techniques (e.g., random forest) or ensemble models.
+
+
+
+
+
+
+
+
+
+
